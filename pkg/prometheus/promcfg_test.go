@@ -2910,6 +2910,138 @@ scrape_configs:
 	}
 }
 
+func TestDisabledServiceEndpointLabelOnServiceMonitor(t *testing.T) {
+	p := &monitoringv1.Prometheus{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "ns-value",
+		},
+		Spec: monitoringv1.PrometheusSpec{
+			CommonPrometheusFields: monitoringv1.CommonPrometheusFields{
+				EnforcedNamespaceLabel: "ns-key",
+				ExcludedFromEnforcement: []monitoringv1.ObjectReference{
+					{
+						Namespace: "service-monitor-ns",
+						Group:     monitoring.GroupName,
+						Resource:  monitoringv1.ServiceMonitorName,
+						Name:      "", // exclude all servicemonitors in this namespace
+					},
+				},
+			},
+		},
+	}
+	cg := mustNewConfigGenerator(t, p)
+
+	cfg, err := cg.Generate(
+		p,
+		map[string]*monitoringv1.ServiceMonitor{
+			"test": {
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "servicemonitor1",
+					Namespace: "service-monitor-ns",
+					Labels: map[string]string{
+						"group": "group1",
+					},
+					Annotations: map[string]string{
+						"operator.prometheus.io/enableServiceEndpointLabel": "false",
+					},
+				},
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: monitoring.GroupName + "/" + monitoringv1.Version,
+					Kind:       monitoringv1.ServiceMonitorsKind,
+				},
+				Spec: monitoringv1.ServiceMonitorSpec{
+					Selector: metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"foo": "bar",
+						},
+					},
+					Endpoints: []monitoringv1.Endpoint{
+						{
+							Port:     "web",
+							Interval: "30s",
+						},
+					},
+				},
+			},
+		},
+		nil,
+		nil,
+		&assets.Store{},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := `global:
+  evaluation_interval: 30s
+  scrape_interval: 30s
+  external_labels:
+    prometheus: ns-value/test
+    prometheus_replica: $(POD_NAME)
+scrape_configs:
+- job_name: serviceMonitor/service-monitor-ns/servicemonitor1/0
+  honor_labels: false
+  kubernetes_sd_configs:
+  - role: endpoints
+    namespaces:
+      names:
+      - service-monitor-ns
+  scrape_interval: 30s
+  relabel_configs:
+  - source_labels:
+    - job
+    target_label: __tmp_prometheus_job_name
+  - action: keep
+    source_labels:
+    - __meta_kubernetes_service_label_foo
+    - __meta_kubernetes_service_labelpresent_foo
+    regex: (bar);true
+  - action: keep
+    source_labels:
+    - __meta_kubernetes_endpoint_port_name
+    regex: web
+  - source_labels:
+    - __meta_kubernetes_namespace
+    target_label: namespace
+  - source_labels:
+    - __meta_kubernetes_service_name
+    target_label: service
+  - source_labels:
+    - __meta_kubernetes_pod_name
+    target_label: pod
+  - source_labels:
+    - __meta_kubernetes_pod_container_name
+    target_label: container
+  - source_labels:
+    - __meta_kubernetes_service_name
+    target_label: job
+    replacement: ${1}
+  - target_label: endpoint
+    replacement: web
+  - source_labels:
+    - __address__
+    target_label: __tmp_hash
+    modulus: 1
+    action: hashmod
+  - source_labels:
+    - __tmp_hash
+    regex: $(SHARD)
+    action: keep
+  metric_relabel_configs: []
+`
+
+	result := string(cfg)
+	if expected != result {
+		diff := cmp.Diff(expected, result)
+		t.Fatalf("expected Prometheus configuration and actual configuration do not match for enforced namespace label test:\n%s", diff)
+	}
+}
+
 func TestAdditionalAlertmanagers(t *testing.T) {
 	p := &monitoringv1.Prometheus{
 		ObjectMeta: metav1.ObjectMeta{
@@ -8759,4 +8891,72 @@ scrape_configs:
 
 func getInt64Pointer(i int64) *int64 {
 	return &i
+}
+
+func TestAppendScrapedMetadataLabel(t *testing.T) {
+	cg := mustNewConfigGenerator(
+		t,
+		&monitoringv1.Prometheus{
+			Spec: monitoringv1.PrometheusSpec{
+				CommonPrometheusFields: monitoringv1.CommonPrometheusFields{
+					IgnoreNamespaceSelectors: false,
+				},
+			},
+		},
+	)
+
+	annotations := make(map[string]string)
+	annotations["annotationWithValue"] = "value"
+	annotations["emptyAnnotation"] = ""
+
+	object_meta := metav1.ObjectMeta{
+		Annotations: annotations,
+	}
+
+	relabelings := []yaml.MapSlice{}
+
+	// This should be added to relabelings as-is
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&object_meta,
+		"missing_src",
+		"missing_tgt",
+		"missingAnnotation",
+	)
+
+	// This should be added with target_label=value
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&object_meta,
+		"src",
+		"tgt",
+		"annotationWithValue",
+	)
+
+	// This entry should not be added to relabelings
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&object_meta,
+		"empty_src",
+		"empty_tgt",
+		"emptyAnnotation",
+	)
+
+	s, err := yaml.Marshal(relabelings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := `- source_labels:
+  - missing_src
+  target_label: missing_tgt
+- source_labels:
+  - src
+  target_label: value
+`
+
+	result := string(s)
+	if expected != result {
+		t.Fatalf("Unexpected result.\n\nGot:\n\n%s\n\nExpected:\n\n%s\n\n", result, expected)
+	}
 }

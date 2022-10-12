@@ -19,6 +19,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/blang/semver/v4"
@@ -42,7 +43,12 @@ const (
 )
 
 var (
-	invalidLabelCharRE = regexp.MustCompile(`[^a-zA-Z0-9_]`)
+	invalidLabelCharRE                   = regexp.MustCompile(`[^a-zA-Z0-9_]`)
+	enableServiceEndpointLabelAnnotation = "operator.prometheus.io/enableServiceEndpointLabel"
+	scrapedNamespaceLabelAnnotation      = "operator.prometheus.io/scrapedNamespaceLabel"
+	scrapedServiceNameLabelAnnotation    = "operator.prometheus.io/scrapedServiceNameLabel"
+	scrapedPodNameLabelAnnotation        = "operator.prometheus.io/scrapedPodNameLabel"
+	scrapedContainerNameLabelAnnotation  = "operator.prometheus.io/scrapedContainerNameLabel"
 )
 
 func sanitizeLabelName(name string) string {
@@ -725,6 +731,30 @@ func initRelabelings() []yaml.MapSlice {
 	}
 }
 
+func (cg *ConfigGenerator) appendScrapedMetadataLabel(
+	relabelings []yaml.MapSlice,
+	m *metav1.ObjectMeta,
+	sourceLabel string,
+	defaultTargetLabel string,
+	overrideAnnotation string,
+) []yaml.MapSlice {
+	targetLabel, found := m.Annotations[overrideAnnotation]
+	if !found {
+		targetLabel = defaultTargetLabel
+	}
+
+	if targetLabel == "" {
+		return relabelings
+	}
+
+	return append(relabelings, []yaml.MapSlice{
+		{
+			{Key: "source_labels", Value: []string{sourceLabel}},
+			{Key: "target_label", Value: targetLabel},
+		},
+	}...)
+}
+
 func (cg *ConfigGenerator) generatePodMonitorConfig(
 	m *v1.PodMonitor,
 	ep v1.PodMetricsEndpoint,
@@ -874,21 +904,29 @@ func (cg *ConfigGenerator) generatePodMonitorConfig(
 		}
 	}
 
-	// Relabel namespace and pod and service labels into proper labels.
-	relabelings = append(relabelings, []yaml.MapSlice{
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_namespace"}},
-			{Key: "target_label", Value: "namespace"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_container_name"}},
-			{Key: "target_label", Value: "container"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_name"}},
-			{Key: "target_label", Value: "pod"},
-		},
-	}...)
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&m.ObjectMeta,
+		"__meta_kubernetes_namespace",
+		"namespace",
+		scrapedNamespaceLabelAnnotation,
+	)
+
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&m.ObjectMeta,
+		"__meta_kubernetes_pod_container_name",
+		"container",
+		scrapedContainerNameLabelAnnotation,
+	)
+
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&m.ObjectMeta,
+		"__meta_kubernetes_pod_name",
+		"pod",
+		scrapedPodNameLabelAnnotation,
+	)
 
 	// Relabel targetLabels from Pod onto target.
 	for _, l := range m.Spec.PodTargetLabels {
@@ -1345,44 +1383,69 @@ func (cg *ConfigGenerator) generateServiceMonitorConfig(
 		}
 	}
 
-	sourceLabels := []string{"__meta_kubernetes_endpoint_address_target_kind", "__meta_kubernetes_endpoint_address_target_name"}
-	if cg.EndpointSliceSupported() {
-		sourceLabels = []string{"__meta_kubernetes_endpointslice_address_target_kind", "__meta_kubernetes_endpointslice_address_target_name"}
+	enableServiceEndpointLabel := true
+	v, found := m.Annotations[enableServiceEndpointLabelAnnotation]
+
+	if found {
+		enableServiceEndpointLabel, _ = strconv.ParseBool(v)
 	}
 
-	// Relabel namespace and pod and service labels into proper labels.
-	relabelings = append(relabelings, []yaml.MapSlice{
-		{ // Relabel node labels with meta labels available with Prometheus >= v2.3.
-			yaml.MapItem{Key: "source_labels", Value: sourceLabels},
-			{Key: "separator", Value: ";"},
-			{Key: "regex", Value: "Node;(.*)"},
-			{Key: "replacement", Value: "${1}"},
-			{Key: "target_label", Value: "node"},
-		},
-		{ // Relabel pod labels for >=v2.3 meta labels
-			yaml.MapItem{Key: "source_labels", Value: sourceLabels},
-			{Key: "separator", Value: ";"},
-			{Key: "regex", Value: "Pod;(.*)"},
-			{Key: "replacement", Value: "${1}"},
-			{Key: "target_label", Value: "pod"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_namespace"}},
-			{Key: "target_label", Value: "namespace"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_service_name"}},
-			{Key: "target_label", Value: "service"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_name"}},
-			{Key: "target_label", Value: "pod"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_container_name"}},
-			{Key: "target_label", Value: "container"},
-		},
-	}...)
+	if enableServiceEndpointLabel {
+		sourceLabels := []string{"__meta_kubernetes_endpoint_address_target_kind", "__meta_kubernetes_endpoint_address_target_name"}
+		if cg.EndpointSliceSupported() {
+			sourceLabels = []string{"__meta_kubernetes_endpointslice_address_target_kind", "__meta_kubernetes_endpointslice_address_target_name"}
+		}
+
+		// Relabel namespace and pod and service labels into proper labels.
+		relabelings = append(relabelings, []yaml.MapSlice{
+			{ // Relabel node labels with meta labels available with Prometheus >= v2.3.
+				yaml.MapItem{Key: "source_labels", Value: sourceLabels},
+				{Key: "separator", Value: ";"},
+				{Key: "regex", Value: "Node;(.*)"},
+				{Key: "replacement", Value: "${1}"},
+				{Key: "target_label", Value: "node"},
+			},
+			{ // Relabel pod labels for >=v2.3 meta labels
+				yaml.MapItem{Key: "source_labels", Value: sourceLabels},
+				{Key: "separator", Value: ";"},
+				{Key: "regex", Value: "Pod;(.*)"},
+				{Key: "replacement", Value: "${1}"},
+				{Key: "target_label", Value: "pod"},
+			},
+		}...)
+	}
+
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&m.ObjectMeta,
+		"__meta_kubernetes_namespace",
+		"namespace",
+		scrapedNamespaceLabelAnnotation,
+	)
+
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&m.ObjectMeta,
+		"__meta_kubernetes_service_name",
+		"service",
+		scrapedServiceNameLabelAnnotation,
+	)
+
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&m.ObjectMeta,
+		"__meta_kubernetes_pod_name",
+		"pod",
+		scrapedPodNameLabelAnnotation,
+	)
+
+	relabelings = cg.appendScrapedMetadataLabel(
+		relabelings,
+		&m.ObjectMeta,
+		"__meta_kubernetes_pod_container_name",
+		"container",
+		scrapedContainerNameLabelAnnotation,
+	)
 
 	// Relabel targetLabels from Service onto target.
 	for _, l := range m.Spec.TargetLabels {
