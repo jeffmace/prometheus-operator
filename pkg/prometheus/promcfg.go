@@ -19,6 +19,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/blang/semver/v4"
@@ -42,7 +43,8 @@ const (
 )
 
 var (
-	invalidLabelCharRE = regexp.MustCompile(`[^a-zA-Z0-9_]`)
+	invalidLabelCharRE             = regexp.MustCompile(`[^a-zA-Z0-9_]`)
+	enableMetadataLabelsAnnotation = "operator.prometheus.io/enableMetadataLabels"
 )
 
 func sanitizeLabelName(name string) string {
@@ -732,6 +734,13 @@ func (cg *ConfigGenerator) generatePodMonitorConfig(
 	store *assets.Store,
 	shards int32,
 ) yaml.MapSlice {
+	enableMetadataLabels := true
+	v, found := m.Annotations[enableMetadataLabelsAnnotation]
+
+	if found {
+		enableMetadataLabels, _ = strconv.ParseBool(v)
+	}
+
 	cfg := yaml.MapSlice{
 		{
 			Key:   "job_name",
@@ -874,21 +883,23 @@ func (cg *ConfigGenerator) generatePodMonitorConfig(
 		}
 	}
 
-	// Relabel namespace and pod and service labels into proper labels.
-	relabelings = append(relabelings, []yaml.MapSlice{
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_namespace"}},
-			{Key: "target_label", Value: "namespace"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_container_name"}},
-			{Key: "target_label", Value: "container"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_name"}},
-			{Key: "target_label", Value: "pod"},
-		},
-	}...)
+	if enableMetadataLabels {
+		// Relabel namespace and pod and service labels into proper labels.
+		relabelings = append(relabelings, []yaml.MapSlice{
+			{
+				{Key: "source_labels", Value: []string{"__meta_kubernetes_namespace"}},
+				{Key: "target_label", Value: "namespace"},
+			},
+			{
+				{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_container_name"}},
+				{Key: "target_label", Value: "container"},
+			},
+			{
+				{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_name"}},
+				{Key: "target_label", Value: "pod"},
+			},
+		}...)
+	}
 
 	// Relabel targetLabels from Pod onto target.
 	for _, l := range m.Spec.PodTargetLabels {
@@ -919,16 +930,18 @@ func (cg *ConfigGenerator) generatePodMonitorConfig(
 		})
 	}
 
-	if ep.Port != "" {
-		relabelings = append(relabelings, yaml.MapSlice{
-			{Key: "target_label", Value: "endpoint"},
-			{Key: "replacement", Value: ep.Port},
-		})
-	} else if ep.TargetPort != nil && ep.TargetPort.String() != "" { //nolint:staticcheck // Ignore SA1019 this field is marked as deprecated.
-		relabelings = append(relabelings, yaml.MapSlice{
-			{Key: "target_label", Value: "endpoint"},
-			{Key: "replacement", Value: ep.TargetPort.String()}, //nolint:staticcheck // Ignore SA1019 this field is marked as deprecated.
-		})
+	if enableMetadataLabels {
+		if ep.Port != "" {
+			relabelings = append(relabelings, yaml.MapSlice{
+				{Key: "target_label", Value: "endpoint"},
+				{Key: "replacement", Value: ep.Port},
+			})
+		} else if ep.TargetPort != nil && ep.TargetPort.String() != "" { //nolint:staticcheck // Ignore SA1019 this field is marked as deprecated.
+			relabelings = append(relabelings, yaml.MapSlice{
+				{Key: "target_label", Value: "endpoint"},
+				{Key: "replacement", Value: ep.TargetPort.String()}, //nolint:staticcheck // Ignore SA1019 this field is marked as deprecated.
+			})
+		}
 	}
 
 	labeler := namespacelabeler.New(cg.spec.EnforcedNamespaceLabel, cg.spec.ExcludedFromEnforcement, false)
@@ -1201,6 +1214,13 @@ func (cg *ConfigGenerator) generateServiceMonitorConfig(
 	store *assets.Store,
 	shards int32,
 ) yaml.MapSlice {
+	enableMetadataLabels := true
+	v, found := m.Annotations[enableMetadataLabelsAnnotation]
+
+	if found {
+		enableMetadataLabels, _ = strconv.ParseBool(v)
+	}
+
 	cfg := yaml.MapSlice{
 		{
 			Key:   "job_name",
@@ -1345,44 +1365,46 @@ func (cg *ConfigGenerator) generateServiceMonitorConfig(
 		}
 	}
 
-	sourceLabels := []string{"__meta_kubernetes_endpoint_address_target_kind", "__meta_kubernetes_endpoint_address_target_name"}
-	if cg.EndpointSliceSupported() {
-		sourceLabels = []string{"__meta_kubernetes_endpointslice_address_target_kind", "__meta_kubernetes_endpointslice_address_target_name"}
-	}
+	if enableMetadataLabels {
+		sourceLabels := []string{"__meta_kubernetes_endpoint_address_target_kind", "__meta_kubernetes_endpoint_address_target_name"}
+		if cg.EndpointSliceSupported() {
+			sourceLabels = []string{"__meta_kubernetes_endpointslice_address_target_kind", "__meta_kubernetes_endpointslice_address_target_name"}
+		}
 
-	// Relabel namespace and pod and service labels into proper labels.
-	relabelings = append(relabelings, []yaml.MapSlice{
-		{ // Relabel node labels with meta labels available with Prometheus >= v2.3.
-			yaml.MapItem{Key: "source_labels", Value: sourceLabels},
-			{Key: "separator", Value: ";"},
-			{Key: "regex", Value: "Node;(.*)"},
-			{Key: "replacement", Value: "${1}"},
-			{Key: "target_label", Value: "node"},
-		},
-		{ // Relabel pod labels for >=v2.3 meta labels
-			yaml.MapItem{Key: "source_labels", Value: sourceLabels},
-			{Key: "separator", Value: ";"},
-			{Key: "regex", Value: "Pod;(.*)"},
-			{Key: "replacement", Value: "${1}"},
-			{Key: "target_label", Value: "pod"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_namespace"}},
-			{Key: "target_label", Value: "namespace"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_service_name"}},
-			{Key: "target_label", Value: "service"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_name"}},
-			{Key: "target_label", Value: "pod"},
-		},
-		{
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_container_name"}},
-			{Key: "target_label", Value: "container"},
-		},
-	}...)
+		// Relabel namespace and pod and service labels into proper labels.
+		relabelings = append(relabelings, []yaml.MapSlice{
+			{ // Relabel node labels with meta labels available with Prometheus >= v2.3.
+				yaml.MapItem{Key: "source_labels", Value: sourceLabels},
+				{Key: "separator", Value: ";"},
+				{Key: "regex", Value: "Node;(.*)"},
+				{Key: "replacement", Value: "${1}"},
+				{Key: "target_label", Value: "node"},
+			},
+			{ // Relabel pod labels for >=v2.3 meta labels
+				yaml.MapItem{Key: "source_labels", Value: sourceLabels},
+				{Key: "separator", Value: ";"},
+				{Key: "regex", Value: "Pod;(.*)"},
+				{Key: "replacement", Value: "${1}"},
+				{Key: "target_label", Value: "pod"},
+			},
+			{
+				{Key: "source_labels", Value: []string{"__meta_kubernetes_namespace"}},
+				{Key: "target_label", Value: "namespace"},
+			},
+			{
+				{Key: "source_labels", Value: []string{"__meta_kubernetes_service_name"}},
+				{Key: "target_label", Value: "service"},
+			},
+			{
+				{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_name"}},
+				{Key: "target_label", Value: "pod"},
+			},
+			{
+				{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_container_name"}},
+				{Key: "target_label", Value: "container"},
+			},
+		}...)
+	}
 
 	// Relabel targetLabels from Service onto target.
 	for _, l := range m.Spec.TargetLabels {
@@ -1420,19 +1442,21 @@ func (cg *ConfigGenerator) generateServiceMonitorConfig(
 		})
 	}
 
-	// A single service may potentially have multiple metrics
-	//	endpoints, therefore the endpoints labels is filled with the ports name or
-	//	as a fallback the port number.
-	if ep.Port != "" {
-		relabelings = append(relabelings, yaml.MapSlice{
-			{Key: "target_label", Value: "endpoint"},
-			{Key: "replacement", Value: ep.Port},
-		})
-	} else if ep.TargetPort != nil && ep.TargetPort.String() != "" {
-		relabelings = append(relabelings, yaml.MapSlice{
-			{Key: "target_label", Value: "endpoint"},
-			{Key: "replacement", Value: ep.TargetPort.String()},
-		})
+	if enableMetadataLabels {
+		// A single service may potentially have multiple metrics
+		//	endpoints, therefore the endpoints labels is filled with the ports name or
+		//	as a fallback the port number.
+		if ep.Port != "" {
+			relabelings = append(relabelings, yaml.MapSlice{
+				{Key: "target_label", Value: "endpoint"},
+				{Key: "replacement", Value: ep.Port},
+			})
+		} else if ep.TargetPort != nil && ep.TargetPort.String() != "" {
+			relabelings = append(relabelings, yaml.MapSlice{
+				{Key: "target_label", Value: "endpoint"},
+				{Key: "replacement", Value: ep.TargetPort.String()},
+			})
+		}
 	}
 
 	labeler := namespacelabeler.New(cg.spec.EnforcedNamespaceLabel, cg.spec.ExcludedFromEnforcement, false)

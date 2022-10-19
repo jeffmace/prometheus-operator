@@ -68,6 +68,36 @@ spec:
     interval: 15s
 ```
 
+## Default Labels
+
+By default, `PodMonitors` and `ServiceMonitors` include runtime metadata in the scraped results.
+
+### PodMonitors
+
+| Label | Description |
+| ----- | ----------- |
+| job | `{metadata.namespace}/{metadata.name}`  of the `PodMonitor` or read from `jobLabel` if specified |
+| namespace | `{metadata.namespace}` of the scraped pod |
+| container | `{metadata.namespace}` of the container in the scraped pod |
+| pod | `{metadata.name}` of the scraped pod |
+| endpoint | `{spec.Port}` or `{spec.TargetPort}` if specified |
+
+### ServiceMonitors
+
+| Label | Description |
+| ----- | ----------- |
+| job | `{metadata.name}` of the scraped service or read from `jobLabel` if specified |
+| node/pod | Set depending on the endpoint responding to service request |
+| namespace | `{metadata.namespace}` of the scraped pod |
+| service | `{metadata.name}` of the scraped service |
+| pod | `{metadata.name}` of the scraped pod |
+| container | `{metadata.namespace}` of the container in the scraped pod |
+| endpoint | `{spec.Port}` or `{spec.TargetPort}` if specified |
+
+### Configuration
+
+All default labels, except `job`, may be disabled by adding `operator.prometheus.io/enableMetadataLabels: "false"` to the annotations of a `PodMonitor` or `ServiceMonitor` object.
+
 ## Troubleshooting
 
 ### Namespace "limits"/things to keep in mind
