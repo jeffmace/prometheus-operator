@@ -68,6 +68,44 @@ spec:
     interval: 15s
 ```
 
+## Default Labels
+
+By default, `PodMonitors` and `ServiceMonitors` include runtime metadata in the scraped results.
+
+### PodMonitors
+
+| Label | Description |
+| ----- | ----------- |
+| job | `{metadata.namespace}/{metadata.name}`  of the `PodMonitor` or read from `jobLabel` if specified |
+| namespace | `{metadata.namespace}` of the scraped pod |
+| container | `{metadata.namespace}` of the container in the scraped pod |
+| pod | `{metadata.name}` of the scraped pod |
+| endpoint | `{spec.Port}` or `{spec.TargetPort}` if specified |
+
+### ServiceMonitors
+
+| Label | Description |
+| ----- | ----------- |
+| job | `{metadata.name}` of the scraped service or read from `jobLabel` if specified |
+| node/pod | Set depending on the endpoint responding to service request |
+| namespace | `{metadata.namespace}` of the scraped pod |
+| service | `{metadata.name}` of the scraped service |
+| pod | `{metadata.name}` of the scraped pod |
+| container | `{metadata.namespace}` of the container in the scraped pod |
+| endpoint | `{spec.Port}` or `{spec.TargetPort}` if specified |
+
+### Configuration
+
+The default labels may be configured by adding annotations to the `PodMonitor` or `ServiceMonitor` object. Each annotation will rename or disable the related labels. Setting the annotation to blank will disable the label.
+
+| Annotation | |
+| ---------- | ----------- |
+| `operator.prometheus.io/enableServiceEndpointLabel` | Set to `false` to disable the `node`, `pod` and `endpoint` labels. |
+| `operator.prometheus.io/scrapedNamespaceLabel` | Configures the `namespace` label |
+| `operator.prometheus.io/scrapedServiceNameLabel` | Configures the `service` label |
+| `operator.prometheus.io/scrapedPodNameLabel` | Configures the `pod` label |
+| `operator.prometheus.io/scrapedContainerNameLabel` | Configures the `container` label |
+
 ## Troubleshooting
 
 ### Namespace "limits"/things to keep in mind
